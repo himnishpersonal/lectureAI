@@ -15,7 +15,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from .models import (
     CourseDB, DocumentDB, ChunkDB, AINotesDB, CourseCreate, CourseResponse,
     DocumentCreate, DocumentResponse, QueryRequest, QueryResponse, UploadResponse,
-    AINotesResponse, AINotesGenerate, TranscriptionStatus, TranscriptResponse
+    AINotesResponse, AINotesGenerate, TranscriptionStatus, TranscriptResponse,
+    DocumentWithNotesResponse
 )
 from .utils.config import get_settings
 from .services.document_processor import DocumentProcessor
@@ -491,17 +492,6 @@ async def get_documents(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/documents/{document_id}", response_model=DocumentResponse)
-async def get_document(document_id: int, db: Session = Depends(get_db)):
-    """Get a specific document by ID."""
-    try:
-        document = db.query(DocumentDB).filter(DocumentDB.id == document_id).first()
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return document
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: int, db: Session = Depends(get_db)):
     """Delete a document and all associated data."""
@@ -586,8 +576,47 @@ async def query_documents(
 ):
     """Query documents using RAG."""
     try:
+        # Handle course-based queries (from chat interface)
+        if query.course_id:
+            # Verify course exists
+            course = db.query(CourseDB).filter(CourseDB.id == query.course_id).first()
+            if not course:
+                raise HTTPException(status_code=404, detail="Course not found")
+            
+            # Check if course has any processed documents
+            document_count = db.query(DocumentDB).filter(
+                DocumentDB.course_id == query.course_id,
+                DocumentDB.processed == "completed"
+            ).count()
+            
+            if document_count == 0:
+                return {
+                    "answer": f"Course '{course.name}' has no processed documents yet. Please upload some documents first.",
+                    "citations": [],
+                    "success": False
+                }
+            
+            # Perform RAG query on the course
+            result = rag_service.query_course(
+                user_input=query.question,
+                course_id=query.course_id,
+                max_results=query.max_results or 5
+            )
+            
+            return {
+                "answer": result["answer"],
+                "citations": result["citations"],
+                "success": result["success"],
+                "model_info": result.get("model_info", {}),
+                "course_info": {
+                    "course_id": query.course_id,
+                    "course_name": course.name,
+                    "document_count": document_count
+                }
+            }
+        
         # If specific document IDs are provided, query each one
-        if query.document_ids and len(query.document_ids) == 1:
+        elif query.document_ids and len(query.document_ids) == 1:
             # Single document query
             document_id = query.document_ids[0]
             
@@ -618,13 +647,15 @@ async def query_documents(
             }
         
         else:
-            # Multi-document or no specific document query
+            # No specific course or document specified
             return {
-                "answer": "Multi-document querying is not yet implemented. Please select a single document to query.",
+                "answer": "Please specify either a course_id or document_ids to query.",
                 "citations": [],
                 "success": False
             }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in query endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1111,18 +1142,7 @@ async def get_transcript(
         logger.error(f"Error getting transcript: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/documents/{document_id}")
-async def get_document(document_id: int, db: Session = Depends(get_db)):
-    """Get document details by ID."""
-    try:
-        document = db.query(DocumentDB).filter(DocumentDB.id == document_id).first()
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return document
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/documents/with-notes")
+@app.get("/documents/with-notes", response_model=List[DocumentWithNotesResponse])
 async def get_documents_with_notes(db: Session = Depends(get_db)):
     """Get all documents that have AI notes."""
     try:
@@ -1133,21 +1153,32 @@ async def get_documents_with_notes(db: Session = Depends(get_db)):
         result = []
         for doc in documents_with_notes:
             course = db.query(CourseDB).filter(CourseDB.id == doc.course_id).first()
-            doc_dict = {
-                "id": doc.id,
-                "filename": doc.filename,
-                "course_id": doc.course_id,
-                "course_name": course.name if course else "Unknown",
-                "has_notes": True,
-                "is_audio": doc.is_audio,
-                "upload_date": doc.upload_date
-            }
-            result.append(doc_dict)
+            doc_response = DocumentWithNotesResponse(
+                id=doc.id,
+                filename=doc.filename,
+                course_id=doc.course_id,
+                course_name=course.name if course else "Unknown",
+                has_notes=True,
+                is_audio=doc.is_audio or "false",
+                upload_date=doc.upload_date
+            )
+            result.append(doc_response)
         
         return result
     except Exception as e:
         logger.error(f"Error getting documents with notes: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/documents/{document_id}", response_model=DocumentResponse)
+async def get_document(document_id: int, db: Session = Depends(get_db)):
+    """Get document details by ID."""
+    try:
+        document = db.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return document
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/documents/{document_id}/audio")
 async def stream_audio(document_id: int, db: Session = Depends(get_db)):

@@ -115,8 +115,16 @@ class DocumentResponse(BaseModel):
 class QueryRequest(BaseModel):
     """Model for RAG query request."""
     question: str
+    query: Optional[str] = None  # Alias for question for frontend compatibility
+    course_id: Optional[int] = None  # Course to query
     document_ids: Optional[List[int]] = None  # Filter by specific documents
     max_results: Optional[int] = 5
+    
+    def __init__(self, **data):
+        # Handle frontend sending 'query' instead of 'question'
+        if 'query' in data and 'question' not in data:
+            data['question'] = data['query']
+        super().__init__(**data)
 
 class QueryResponse(BaseModel):
     """Model for RAG query response."""
@@ -167,3 +175,16 @@ class TranscriptResponse(BaseModel):
     transcript: str
     audio_duration: Optional[float]
     transcription_metadata: Optional[dict] = None
+
+class DocumentWithNotesResponse(BaseModel):
+    """Model for document with notes response."""
+    id: int
+    filename: str
+    course_id: int
+    course_name: str
+    has_notes: bool
+    is_audio: Optional[str] = "false"
+    upload_date: datetime
+    
+    class Config:
+        from_attributes = True

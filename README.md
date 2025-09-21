@@ -16,7 +16,7 @@ An AI-powered educational platform that transforms lectures and documents into i
 
 ### Backend (FastAPI)
 - **API Server**: FastAPI with automatic documentation
-- **Database**: SQLite with SQLAlchemy ORM
+- **Database**: SQLite with SQLAlchemy ORMcvfcd
 - **Vector Store**: FAISS for semantic search
 - **AI Services**: OpenAI/OpenRouter integration for LLM responses
 - **Transcription**: Faster Whisper for audio processing
