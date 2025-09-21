@@ -6,15 +6,15 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 from .models import (
-    CourseDB, DocumentDB, ChunkDB, AINotesDB, CourseCreate, CourseResponse,
-    DocumentCreate, DocumentResponse, QueryRequest, QueryResponse, UploadResponse,
+    CourseDB, LectureDB, DocumentDB, ChunkDB, AINotesDB, CourseCreate, CourseResponse,
+    LectureCreate, LectureResponse, DocumentCreate, DocumentResponse, QueryRequest, QueryResponse, UploadResponse,
     AINotesResponse, AINotesGenerate, TranscriptionStatus, TranscriptResponse,
     DocumentWithNotesResponse
 )
@@ -56,44 +56,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 from .models import Base
 Base.metadata.create_all(bind=engine)
 
-# Migrate existing documents to have a default course if needed
-def migrate_existing_documents():
-    """Migrate existing documents to have a course_id."""
-    db = SessionLocal()
-    try:
-        # Check if there are documents without course_id
-        documents_without_course = db.query(DocumentDB).filter(DocumentDB.course_id == None).all()
-        
-        if documents_without_course:
-            logger.info(f"Found {len(documents_without_course)} documents without course association")
-            
-            # Create a default "Legacy Materials" course
-            default_course = db.query(CourseDB).filter(CourseDB.name == "Legacy Materials").first()
-            if not default_course:
-                default_course = CourseDB(
-                    name="Legacy Materials",
-                    description="Course materials uploaded before the course organization system was implemented"
-                )
-                db.add(default_course)
-                db.commit()
-                db.refresh(default_course)
-                logger.info("Created default 'Legacy Materials' course")
-            
-            # Assign all documents without course to the default course
-            for doc in documents_without_course:
-                doc.course_id = default_course.id
-            
-            db.commit()
-            logger.info(f"Migrated {len(documents_without_course)} documents to 'Legacy Materials' course")
-        
-    except Exception as e:
-        logger.error(f"Error during migration: {str(e)}")
-        db.rollback()
-    finally:
-        db.close()
-
-# Run migration on startup
-migrate_existing_documents()
+# Note: Database migration should be run manually using migrate_database.py
+# This ensures proper schema updates before the application starts
 
 # Dependency to get database session
 def get_db():
@@ -173,9 +137,15 @@ async def process_audio_file_async(document_id: int, file_path: str, db: Session
                         metadata["is_audio"] = True
                         chunk_metadata.append(metadata)
                     
+                    # Get course_id from lecture
+                    lecture = async_db.query(LectureDB).filter(LectureDB.id == document.lecture_id).first()
+                    if not lecture:
+                        logger.error(f"Lecture {document.lecture_id} not found for document {document.id}")
+                        return
+                    
                     # Store embeddings in course-based vector store
                     vector_ids = vector_store.add_course_vectors(
-                        course_id=document.course_id,
+                        course_id=lecture.course_id,
                         document_id=document.id,
                         vectors=embeddings,
                         metadata_list=chunk_metadata
@@ -249,15 +219,24 @@ async def root():
     """Root endpoint."""
     return {"message": "CrossCheck Journalism RAG Assistant API"}
 
-@app.post("/upload", response_model=UploadResponse)
-async def upload_document(
+@app.post("/lectures/{lecture_id}/upload", response_model=UploadResponse)
+async def upload_document_to_lecture(
+    lecture_id: int,
     file: UploadFile = File(...),
+    custom_name: str = Form(None),
     db: Session = Depends(get_db)
 ):
-    """Upload a document for processing."""
+    """Upload a document to a specific lecture for processing."""
     try:
+        # Verify lecture exists
+        lecture = db.query(LectureDB).filter(LectureDB.id == lecture_id).first()
+        if not lecture:
+            raise HTTPException(status_code=404, detail="Lecture not found")
+        
         # Validate file type
-        allowed_types = [".pdf", ".docx", ".txt"]
+        document_types = [".pdf", ".docx", ".txt"]
+        audio_types = [".mp3", ".wav", ".m4a", ".mp4"]
+        allowed_types = document_types + audio_types
         file_extension = os.path.splitext(file.filename)[1].lower()
         
         if file_extension not in allowed_types:
@@ -266,9 +245,22 @@ async def upload_document(
                 detail=f"File type {file_extension} not supported. Allowed: {allowed_types}"
             )
         
+        # Determine if this is an audio file
+        is_audio = file_extension in audio_types
+        
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{file.filename}"
+        
+        # Use custom name if provided, otherwise use original filename
+        if custom_name and custom_name.strip():
+            display_name = custom_name.strip()
+            # Ensure the display name has the correct extension
+            if not display_name.endswith(file_extension):
+                display_name += file_extension
+        else:
+            display_name = file.filename
+        
+        filename = f"{timestamp}_{display_name}"
         file_path = os.path.join(settings.UPLOAD_DIR, filename)
         
         # Save file
@@ -284,7 +276,9 @@ async def upload_document(
             file_path=file_path,
             file_type=file_extension,
             file_size=file_size,
-            processed="pending"
+            processed="pending",
+            lecture_id=lecture_id,
+            is_audio="true" if is_audio else "false"
         )
         
         db.add(db_document)
@@ -293,8 +287,27 @@ async def upload_document(
         
         # Process document immediately (in production, consider async processing)
         try:
-            # Process the document to extract text and create chunks
-            processing_result = document_processor.process_document(file_path, db_document.id)
+            if is_audio:
+                # Handle audio transcription
+                transcription_result = transcription_service.transcribe_audio(file_path)
+                
+                if transcription_result["success"]:
+                    db_document.transcript = transcription_result["transcript"]
+                    db_document.transcription_status = "completed"
+                    db_document.audio_duration = transcription_result.get("duration")
+                    db_document.transcription_metadata = json.dumps(transcription_result.get("metadata", {}))
+                    
+                    # Process transcript as text document
+                    processing_result = document_processor.process_text(
+                        transcription_result["transcript"], 
+                        db_document.id
+                    )
+                else:
+                    db_document.transcription_status = "failed"
+                    processing_result = {"success": False, "chunks": []}
+            else:
+                # Process regular document
+                processing_result = document_processor.process_document(file_path, db_document.id)
             
             if processing_result["success"]:
                 # Generate embeddings for chunks
@@ -308,10 +321,13 @@ async def upload_document(
                     metadata = chunk["metadata"].copy()
                     metadata["text"] = chunk["text"]  # Include text in metadata
                     metadata["filename"] = filename
+                    metadata["lecture_id"] = lecture_id
+                    metadata["course_id"] = lecture.course_id
                     chunk_metadata.append(metadata)
                 
-                # Store embeddings in vector store
-                vector_ids = vector_store.add_document_vectors(
+                # Store embeddings in course-based vector store
+                vector_ids = vector_store.add_course_vectors(
+                    course_id=lecture.course_id,
                     document_id=db_document.id,
                     vectors=embeddings,
                     metadata_list=chunk_metadata
@@ -333,6 +349,40 @@ async def upload_document(
                 db_document.num_chunks = len(chunks_with_embeddings)
                 db.commit()
                 
+                # Automatically generate AI notes for the document
+                try:
+                    logger.info(f"Auto-generating AI notes for document {db_document.id}")
+                    
+                    # Get document chunks for AI notes generation
+                    chunks = db.query(ChunkDB).filter(ChunkDB.document_id == db_document.id).all()
+                    
+                    if chunks:
+                        # Convert chunks to the format expected by the RAG service
+                        chunk_data = [{"content": chunk.content} for chunk in chunks]
+                        
+                        # Generate notes using RAG service
+                        result = rag_service.generate_document_notes(chunk_data, db_document.filename)
+                        
+                        if result.get("success", False):
+                            # Save AI notes to database
+                            ai_notes = AINotesDB(
+                                document_id=db_document.id,
+                                notes=result["notes"],
+                                generated_at=datetime.utcnow(),
+                                model_used=result.get("model_used", "deepseek/deepseek-chat")
+                            )
+                            db.add(ai_notes)
+                            db.commit()
+                            logger.info(f"AI notes generated successfully for document {db_document.id}")
+                        else:
+                            logger.warning(f"Failed to generate AI notes for document {db_document.id}: {result.get('error', 'Unknown error')}")
+                    else:
+                        logger.warning(f"No chunks found for document {db_document.id}, skipping AI notes generation")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to auto-generate AI notes for document {db_document.id}: {str(e)}")
+                    # Don't fail the upload if notes generation fails
+                
             else:
                 # Mark as failed
                 db_document.processed = "failed"
@@ -349,7 +399,10 @@ async def upload_document(
             filename=filename
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error uploading document: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/courses/{course_id}/documents", response_model=UploadResponse)
@@ -583,9 +636,9 @@ async def query_documents(
             if not course:
                 raise HTTPException(status_code=404, detail="Course not found")
             
-            # Check if course has any processed documents
-            document_count = db.query(DocumentDB).filter(
-                DocumentDB.course_id == query.course_id,
+            # Check if course has any processed documents through its lectures
+            document_count = db.query(DocumentDB).join(LectureDB).filter(
+                LectureDB.course_id == query.course_id,
                 DocumentDB.processed == "completed"
             ).count()
             
@@ -703,14 +756,14 @@ async def create_course(course: CourseCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(db_course)
         
-        # Get document count (will be 0 for new course)
-        document_count = db.query(DocumentDB).filter(DocumentDB.course_id == db_course.id).count()
+        # Get lecture count (will be 0 for new course)
+        lecture_count = db.query(LectureDB).filter(LectureDB.course_id == db_course.id).count()
         
         return CourseResponse(
             id=db_course.id,
             name=db_course.name,
             description=db_course.description,
-            document_count=document_count,
+            lecture_count=lecture_count,
             created_at=db_course.created_at
         )
         
@@ -720,7 +773,7 @@ async def create_course(course: CourseCreate, db: Session = Depends(get_db)):
 
 @app.delete("/courses/{course_id}")
 async def delete_course(course_id: int, db: Session = Depends(get_db)):
-    """Delete a course and all its documents."""
+    """Delete a course and all its lectures and documents."""
     try:
         course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
         if not course:
@@ -728,8 +781,267 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
         
         logger.info(f"Deleting course {course_id}: {course.name}")
         
-        # Get all documents in this course
-        documents = db.query(DocumentDB).filter(DocumentDB.course_id == course_id).all()
+        # Get all lectures in this course
+        lectures = db.query(LectureDB).filter(LectureDB.course_id == course_id).all()
+        
+        total_documents_deleted = 0
+        
+        # Delete each lecture and its documents
+        for lecture in lectures:
+            # Get all documents in this lecture
+            documents = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture.id).all()
+            
+            # Delete each document (this will handle cleanup of chunks, embeddings, AI notes, and files)
+            for document in documents:
+                # Delete AI notes
+                ai_notes = db.query(AINotesDB).filter(AINotesDB.document_id == document.id).all()
+                for note in ai_notes:
+                    db.delete(note)
+                
+                # Delete chunks and their embeddings
+                chunks = db.query(ChunkDB).filter(ChunkDB.document_id == document.id).all()
+                embedding_ids_to_remove = []
+                
+                for chunk in chunks:
+                    if chunk.embedding_id:
+                        embedding_ids_to_remove.append(chunk.embedding_id)
+                    db.delete(chunk)
+                
+                # Remove embeddings from vector store
+                if embedding_ids_to_remove:
+                    try:
+                        vector_store.delete_vectors(embedding_ids_to_remove)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete embeddings from vector store: {e}")
+                
+                # Delete associated files
+                if document.file_path and os.path.exists(document.file_path):
+                    os.remove(document.file_path)
+                
+                # Delete chunks file if it exists
+                chunks_file = os.path.join(
+                    settings.CHUNKS_DIR, 
+                    f"document_{document.id}_chunks.json"
+                )
+                if os.path.exists(chunks_file):
+                    os.remove(chunks_file)
+                
+                # Delete document record
+                db.delete(document)
+                total_documents_deleted += 1
+            
+            # Delete the lecture
+            db.delete(lecture)
+        
+        # Delete the course
+        db.delete(course)
+        db.commit()
+        
+        return {
+            "message": "Course deleted successfully",
+            "details": {
+                "course_id": course_id,
+                "course_name": course.name,
+                "lectures_deleted": len(lectures),
+                "documents_deleted": total_documents_deleted
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting course {course_id}: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete course: {str(e)}")
+
+@app.get("/courses", response_model=List[CourseResponse])
+async def get_courses(db: Session = Depends(get_db)):
+    """Get all courses with lecture counts."""
+    try:
+        courses = db.query(CourseDB).all()
+        
+        course_responses = []
+        for course in courses:
+            # Check if lectures table exists and has data
+            try:
+                lecture_count = db.query(LectureDB).filter(LectureDB.course_id == course.id).count()
+            except Exception:
+                # If lectures table doesn't exist yet, default to 0
+                lecture_count = 0
+            
+            course_responses.append(CourseResponse(
+                id=course.id,
+                name=course.name,
+                description=course.description,
+                lecture_count=lecture_count,
+                created_at=course.created_at
+            ))
+        
+        return course_responses
+        
+    except Exception as e:
+        logger.error(f"Error fetching courses: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/courses/{course_id}", response_model=CourseResponse)
+async def get_course(course_id: int, db: Session = Depends(get_db)):
+    """Get a specific course by ID."""
+    try:
+        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Check if lectures table exists and has data
+        try:
+            lecture_count = db.query(LectureDB).filter(LectureDB.course_id == course.id).count()
+        except Exception:
+            # If lectures table doesn't exist yet, default to 0
+            lecture_count = 0
+        
+        return CourseResponse(
+            id=course.id,
+            name=course.name,
+            description=course.description,
+            lecture_count=lecture_count,
+            created_at=course.created_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching course {course_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/courses/{course_id}/lectures", response_model=List[LectureResponse])
+async def get_course_lectures(course_id: int, db: Session = Depends(get_db)):
+    """Get all lectures in a specific course."""
+    try:
+        # Verify course exists
+        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Get lectures
+        lectures = db.query(LectureDB).filter(LectureDB.course_id == course_id).all()
+        
+        lecture_responses = []
+        for lecture in lectures:
+            document_count = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture.id).count()
+            lecture_responses.append(LectureResponse(
+                id=lecture.id,
+                title=lecture.title,
+                description=lecture.description,
+                lecture_date=lecture.lecture_date,
+                created_at=lecture.created_at,
+                course_id=lecture.course_id,
+                document_count=document_count
+            ))
+        
+        return lecture_responses
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching lectures for course {course_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Lecture Management Endpoints
+@app.post("/courses/{course_id}/lectures", response_model=LectureResponse)
+async def create_lecture(course_id: int, lecture: LectureCreate, db: Session = Depends(get_db)):
+    """Create a new lecture in a course."""
+    try:
+        # Verify course exists
+        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Create new lecture
+        db_lecture = LectureDB(
+            title=lecture.title,
+            description=lecture.description,
+            lecture_date=lecture.lecture_date,
+            course_id=course_id
+        )
+        
+        db.add(db_lecture)
+        db.commit()
+        db.refresh(db_lecture)
+        
+        return LectureResponse(
+            id=db_lecture.id,
+            title=db_lecture.title,
+            description=db_lecture.description,
+            lecture_date=db_lecture.lecture_date,
+            created_at=db_lecture.created_at,
+            course_id=db_lecture.course_id,
+            document_count=0
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating lecture: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/lectures/{lecture_id}", response_model=LectureResponse)
+async def get_lecture(lecture_id: int, db: Session = Depends(get_db)):
+    """Get a specific lecture by ID."""
+    try:
+        lecture = db.query(LectureDB).filter(LectureDB.id == lecture_id).first()
+        
+        if not lecture:
+            raise HTTPException(status_code=404, detail="Lecture not found")
+        
+        document_count = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture.id).count()
+        
+        return LectureResponse(
+            id=lecture.id,
+            title=lecture.title,
+            description=lecture.description,
+            lecture_date=lecture.lecture_date,
+            created_at=lecture.created_at,
+            course_id=lecture.course_id,
+            document_count=document_count
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching lecture {lecture_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/lectures/{lecture_id}/documents", response_model=List[DocumentResponse])
+async def get_lecture_documents(lecture_id: int, db: Session = Depends(get_db)):
+    """Get all documents in a specific lecture."""
+    try:
+        # Verify lecture exists
+        lecture = db.query(LectureDB).filter(LectureDB.id == lecture_id).first()
+        if not lecture:
+            raise HTTPException(status_code=404, detail="Lecture not found")
+        
+        # Get documents
+        documents = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture_id).all()
+        return documents
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching documents for lecture {lecture_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/lectures/{lecture_id}")
+async def delete_lecture(lecture_id: int, db: Session = Depends(get_db)):
+    """Delete a lecture and all its documents."""
+    try:
+        lecture = db.query(LectureDB).filter(LectureDB.id == lecture_id).first()
+        if not lecture:
+            raise HTTPException(status_code=404, detail="Lecture not found")
+        
+        logger.info(f"Deleting lecture {lecture_id}: {lecture.title}")
+        
+        # Get all documents in this lecture
+        documents = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture_id).all()
         
         # Delete each document (this will handle cleanup of chunks, embeddings, AI notes, and files)
         for document in documents:
@@ -769,15 +1081,15 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
             # Delete document record
             db.delete(document)
         
-        # Delete the course
-        db.delete(course)
+        # Delete the lecture
+        db.delete(lecture)
         db.commit()
         
         return {
-            "message": "Course deleted successfully",
+            "message": "Lecture deleted successfully",
             "details": {
-                "course_id": course_id,
-                "course_name": course.name,
+                "lecture_id": lecture_id,
+                "lecture_title": lecture.title,
                 "documents_deleted": len(documents)
             }
         }
@@ -785,76 +1097,9 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting course {course_id}: {str(e)}")
+        logger.error(f"Error deleting lecture {lecture_id}: {str(e)}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete course: {str(e)}")
-
-@app.get("/courses", response_model=List[CourseResponse])
-async def get_courses(db: Session = Depends(get_db)):
-    """Get all courses with document counts."""
-    try:
-        courses = db.query(CourseDB).all()
-        
-        course_responses = []
-        for course in courses:
-            document_count = db.query(DocumentDB).filter(DocumentDB.course_id == course.id).count()
-            course_responses.append(CourseResponse(
-                id=course.id,
-                name=course.name,
-                description=course.description,
-                document_count=document_count,
-                created_at=course.created_at
-            ))
-        
-        return course_responses
-        
-    except Exception as e:
-        logger.error(f"Error fetching courses: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/courses/{course_id}", response_model=CourseResponse)
-async def get_course(course_id: int, db: Session = Depends(get_db)):
-    """Get a specific course by ID."""
-    try:
-        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
-        
-        if not course:
-            raise HTTPException(status_code=404, detail="Course not found")
-        
-        document_count = db.query(DocumentDB).filter(DocumentDB.course_id == course.id).count()
-        
-        return CourseResponse(
-            id=course.id,
-            name=course.name,
-            description=course.description,
-            document_count=document_count,
-            created_at=course.created_at
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching course {course_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/courses/{course_id}/documents", response_model=List[DocumentResponse])
-async def get_course_documents(course_id: int, db: Session = Depends(get_db)):
-    """Get all documents in a specific course."""
-    try:
-        # Verify course exists
-        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
-        if not course:
-            raise HTTPException(status_code=404, detail="Course not found")
-        
-        # Get documents
-        documents = db.query(DocumentDB).filter(DocumentDB.course_id == course_id).all()
-        return documents
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching documents for course {course_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete lecture: {str(e)}")
 
 @app.post("/courses/{course_id}/query")
 async def query_course(
@@ -869,9 +1114,9 @@ async def query_course(
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
         
-        # Check if course has any documents
-        document_count = db.query(DocumentDB).filter(
-            DocumentDB.course_id == course_id,
+        # Check if course has any documents through its lectures
+        document_count = db.query(DocumentDB).join(LectureDB).filter(
+            LectureDB.course_id == course_id,
             DocumentDB.processed == "completed"
         ).count()
         
@@ -908,6 +1153,91 @@ async def query_course(
     except Exception as e:
         logger.error(f"Error in course query endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/courses/{course_id}/rebuild-index")
+async def rebuild_course_index(course_id: int, db: Session = Depends(get_db)):
+    """Rebuild the course index from existing chunks."""
+    try:
+        # Verify course exists
+        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Get all lectures for this course
+        lectures = db.query(LectureDB).filter(LectureDB.course_id == course_id).all()
+        if not lectures:
+            return {"message": f"No lectures found for course {course_id}"}
+        
+        total_chunks = 0
+        total_documents = 0
+        
+        # Process each lecture
+        for lecture in lectures:
+            documents = db.query(DocumentDB).filter(DocumentDB.lecture_id == lecture.id).all()
+            
+            for document in documents:
+                if document.processed != "completed":
+                    continue
+                
+                # Get chunks for this document
+                chunks = db.query(ChunkDB).filter(ChunkDB.document_id == document.id).all()
+                if not chunks:
+                    continue
+                
+                # Prepare embeddings and metadata
+                embeddings = []
+                metadata_list = []
+                
+                for chunk in chunks:
+                    # Regenerate embedding for this chunk
+                    try:
+                        embedding = embedding_service.encode_text(chunk.content)
+                        embeddings.append(embedding)
+                        
+                        # Prepare metadata
+                        metadata = json.loads(chunk.chunk_metadata) if chunk.chunk_metadata else {}
+                        metadata.update({
+                            "text": chunk.content,
+                            "filename": document.filename,
+                            "lecture_id": lecture.id,
+                            "course_id": course_id,
+                            "document_id": document.id,
+                            "chunk_index": chunk.chunk_index
+                        })
+                        metadata_list.append(metadata)
+                    except Exception as e:
+                        logger.warning(f"Failed to generate embedding for chunk {chunk.id}: {e}")
+                        continue
+                
+                if embeddings and metadata_list:
+                    # Add to course index
+                    vector_ids = vector_store.add_course_vectors(
+                        course_id=course_id,
+                        document_id=document.id,
+                        vectors=embeddings,
+                        metadata_list=metadata_list
+                    )
+                    total_chunks += len(vector_ids)
+                    total_documents += 1
+                    logger.info(f"Added {len(vector_ids)} chunks from document {document.id} to course {course_id}")
+        
+        # Save the course index
+        vector_store.save_course_index(course_id)
+        
+        return {
+            "message": f"Successfully rebuilt course index for course {course_id}",
+            "course_id": course_id,
+            "course_name": course.name,
+            "lectures_processed": len(lectures),
+            "documents_processed": total_documents,
+            "chunks_added": total_chunks
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rebuilding course index for course {course_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to rebuild course index: {str(e)}")
 
 @app.get("/health")
 async def health_check():

@@ -19,8 +19,23 @@ class CourseDB(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationship
-    documents = relationship("DocumentDB", back_populates="course")
+    # Relationships
+    lectures = relationship("LectureDB", back_populates="course", cascade="all, delete-orphan")
+
+class LectureDB(Base):
+    """Database model for lectures."""
+    __tablename__ = "lectures"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    lecture_date = Column(DateTime, nullable=True)  # Optional lecture date
+    created_at = Column(DateTime, default=datetime.utcnow)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+    
+    # Relationships
+    course = relationship("CourseDB", back_populates="lectures")
+    documents = relationship("DocumentDB", back_populates="lecture", cascade="all, delete-orphan")
 class DocumentDB(Base):
     """Database model for documents."""
     __tablename__ = "documents"
@@ -33,7 +48,7 @@ class DocumentDB(Base):
     upload_date = Column(DateTime, default=datetime.utcnow)
     processed = Column(String, default="pending")  # pending, processing, completed, failed
     num_chunks = Column(Integer, default=0)
-    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+    lecture_id = Column(Integer, ForeignKey("lectures.id"), nullable=False)
     
     # Audio/Transcription specific fields
     is_audio = Column(String, default="false")  # "true" for audio files, "false" for documents
@@ -43,7 +58,7 @@ class DocumentDB(Base):
     transcription_metadata = Column(Text, nullable=True)  # JSON metadata from transcription
     
     # Relationship
-    course = relationship("CourseDB", back_populates="documents")
+    lecture = relationship("LectureDB", back_populates="documents")
     
 class ChunkDB(Base):
     """Database model for document chunks."""
@@ -80,8 +95,27 @@ class CourseResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
-    document_count: int
+    lecture_count: int
     created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class LectureCreate(BaseModel):
+    """Model for lecture creation."""
+    title: str
+    description: Optional[str] = None
+    lecture_date: Optional[datetime] = None
+
+class LectureResponse(BaseModel):
+    """Model for lecture response."""
+    id: int
+    title: str
+    description: Optional[str]
+    lecture_date: Optional[datetime]
+    created_at: datetime
+    course_id: int
+    document_count: int
     
     class Config:
         from_attributes = True
@@ -100,7 +134,7 @@ class DocumentResponse(BaseModel):
     upload_date: datetime
     processed: str
     num_chunks: int
-    course_id: int
+    lecture_id: int
     
     # Audio/Transcription fields
     is_audio: Optional[str] = "false"
@@ -117,6 +151,7 @@ class QueryRequest(BaseModel):
     question: str
     query: Optional[str] = None  # Alias for question for frontend compatibility
     course_id: Optional[int] = None  # Course to query
+    lecture_id: Optional[int] = None  # Lecture to query
     document_ids: Optional[List[int]] = None  # Filter by specific documents
     max_results: Optional[int] = 5
     
@@ -180,6 +215,8 @@ class DocumentWithNotesResponse(BaseModel):
     """Model for document with notes response."""
     id: int
     filename: str
+    lecture_id: int
+    lecture_title: str
     course_id: int
     course_name: str
     has_notes: bool
