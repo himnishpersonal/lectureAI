@@ -3,13 +3,53 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, ForeignKey, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Session, relationship
 
 Base = declarative_base()
 
 # SQLAlchemy Models
+class UserDB(Base):
+    """Database model for users."""
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, default="user")  # user, admin
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+    
+    # Usage tracking
+    daily_api_calls = Column(Integer, default=0)
+    daily_api_limit = Column(Integer, default=100)  # Default limit
+    total_documents = Column(Integer, default=0)
+    total_storage_bytes = Column(Integer, default=0)
+    storage_limit_bytes = Column(Integer, default=1073741824)  # 1GB default
+    
+    # Relationships
+    courses = relationship("CourseDB", back_populates="owner", cascade="all, delete-orphan")
+    sessions = relationship("UserSessionDB", back_populates="user", cascade="all, delete-orphan")
+
+class UserSessionDB(Base):
+    """Database model for user sessions."""
+    __tablename__ = "user_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    user = relationship("UserDB", back_populates="sessions")
 class CourseDB(Base):
     """Database model for courses."""
     __tablename__ = "courses"
@@ -18,8 +58,10 @@ class CourseDB(Base):
     name = Column(String, nullable=False)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Relationships
+    owner = relationship("UserDB", back_populates="courses")
     lectures = relationship("LectureDB", back_populates="course", cascade="all, delete-orphan")
 
 class LectureDB(Base):
@@ -85,6 +127,42 @@ class AINotesDB(Base):
     document = relationship("DocumentDB")
 
 # Pydantic Models for API
+class UserCreate(BaseModel):
+    """Model for user registration."""
+    username: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    """Model for user login."""
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    """Model for user response."""
+    id: int
+    username: str
+    email: str
+    role: str
+    is_active: bool
+    created_at: datetime
+    last_login: Optional[datetime]
+    daily_api_calls: int
+    daily_api_limit: int
+    total_documents: int
+    total_storage_bytes: int
+    storage_limit_bytes: int
+    
+    class Config:
+        from_attributes = True
+
+class SessionResponse(BaseModel):
+    """Model for session response."""
+    session_id: str
+    user: UserResponse
+    expires_at: datetime
+    created_at: datetime
+
 class CourseCreate(BaseModel):
     """Model for course creation."""
     name: str

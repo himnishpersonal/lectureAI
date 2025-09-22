@@ -6,17 +6,17 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 from .models import (
-    CourseDB, LectureDB, DocumentDB, ChunkDB, AINotesDB, CourseCreate, CourseResponse,
+    CourseDB, LectureDB, DocumentDB, ChunkDB, AINotesDB, UserDB, CourseCreate, CourseResponse,
     LectureCreate, LectureResponse, DocumentCreate, DocumentResponse, QueryRequest, QueryResponse, UploadResponse,
     AINotesResponse, AINotesGenerate, TranscriptionStatus, TranscriptResponse,
-    DocumentWithNotesResponse
+    DocumentWithNotesResponse, UserCreate, UserLogin, UserResponse, SessionResponse
 )
 from .utils.config import get_settings
 from .services.document_processor import DocumentProcessor
@@ -24,6 +24,9 @@ from .services.embedding_service import EmbeddingService
 from .services.vector_store import VectorStore
 from .services.rag_service import RAGService
 from .services.transcription_service import TranscriptionService
+from .services.auth_service import AuthService
+from .services.user_service import UserService
+from .services.usage_service import UsageService
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -74,9 +77,24 @@ embedding_service = EmbeddingService()
 vector_store = VectorStore()
 rag_service = RAGService(embedding_service=embedding_service, vector_store=vector_store)
 transcription_service = TranscriptionService()
+auth_service = AuthService()
+user_service = UserService(auth_service=auth_service)
+usage_service = UsageService()
 
 # Ensure upload directory exists
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
+# Authentication dependency
+def get_current_user(x_session_id: str = Header(None), db: Session = Depends(get_db)):
+    """Get current user from session ID header."""
+    if not x_session_id:
+        raise HTTPException(status_code=401, detail="X-Session-ID header required")
+    
+    user = auth_service.validate_session(x_session_id, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    return user
 
 async def process_audio_file_async(document_id: int, file_path: str, db: Session):
     """Process audio file asynchronously with transcription and AI notes generation."""
@@ -218,6 +236,96 @@ async def process_audio_file_async(document_id: int, file_path: str, db: Session
 async def root():
     """Root endpoint."""
     return {"message": "CrossCheck Journalism RAG Assistant API"}
+
+# Authentication endpoints
+@app.post("/auth/register", response_model=SessionResponse)
+async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user."""
+    try:
+        result = user_service.create_user(user_data, db)
+        
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["error"])
+        
+        # Create session for new user
+        user = db.query(UserDB).filter(UserDB.username == user_data.username).first()
+        session = auth_service.create_session(user, db)
+        
+        return SessionResponse(
+            session_id=session.session_id,
+            user=result["user"],
+            expires_at=session.expires_at,
+            created_at=session.created_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in user registration: {str(e)}")
+        raise HTTPException(status_code=500, detail="Registration failed")
+
+@app.post("/auth/login", response_model=SessionResponse)
+async def login_user(login_data: UserLogin, db: Session = Depends(get_db)):
+    """Login user and create session."""
+    try:
+        result = user_service.authenticate_user(login_data, db)
+        
+        if not result["success"]:
+            raise HTTPException(status_code=401, detail=result["error"])
+        
+        return SessionResponse(
+            session_id=result["session_id"],
+            user=result["user"],
+            expires_at=result["expires_at"],
+            created_at=datetime.utcnow()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in user login: {str(e)}")
+        raise HTTPException(status_code=500, detail="Login failed")
+
+@app.post("/auth/logout")
+async def logout_user(x_session_id: str = Header(None), db: Session = Depends(get_db)):
+    """Logout user and invalidate session."""
+    try:
+        if not x_session_id:
+            raise HTTPException(status_code=400, detail="X-Session-ID header required")
+        
+        success = auth_service.invalidate_session(x_session_id, db)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return {"message": "Logged out successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in user logout: {str(e)}")
+        raise HTTPException(status_code=500, detail="Logout failed")
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_current_user_info(current_user: UserDB = Depends(get_current_user)):
+    """Get current user information."""
+    return UserResponse.from_orm(current_user)
+
+@app.get("/auth/usage")
+async def get_user_usage_stats(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get user usage statistics."""
+    try:
+        stats = usage_service.get_user_usage_stats(current_user.id, db)
+        if not stats:
+            raise HTTPException(status_code=404, detail="Usage stats not found")
+        
+        return stats
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting usage stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get usage stats")
 
 @app.post("/lectures/{lecture_id}/upload", response_model=UploadResponse)
 async def upload_document_to_lecture(
@@ -403,6 +511,46 @@ async def upload_document_to_lecture(
         raise
     except Exception as e:
         logger.error(f"Error uploading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/courses/{course_id}/documents", response_model=List[DocumentResponse])
+async def get_course_documents(course_id: int, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all documents in a course for the authenticated user."""
+    try:
+        # Verify course exists and belongs to user
+        course = db.query(CourseDB).filter(
+            CourseDB.id == course_id,
+            CourseDB.user_id == current_user.id
+        ).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Get all documents from all lectures in this course
+        documents = db.query(DocumentDB).join(LectureDB).filter(LectureDB.course_id == course_id).all()
+        
+        document_responses = []
+        for document in documents:
+            # Get chunk count for this document
+            chunk_count = db.query(ChunkDB).filter(ChunkDB.document_id == document.id).count()
+            
+            document_responses.append(DocumentResponse(
+                id=document.id,
+                filename=document.filename,
+                file_type=document.file_type,
+                file_size=document.file_size,
+                upload_date=document.upload_date,
+                processed=document.processed,
+                transcription_status=document.transcription_status,
+                lecture_id=document.lecture_id,
+                num_chunks=chunk_count
+            ))
+        
+        return document_responses
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching documents for course {course_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/courses/{course_id}/documents", response_model=UploadResponse)
@@ -743,13 +891,14 @@ async def process_document(document_id: int, db: Session = Depends(get_db)):
 
 # Course Management Endpoints
 @app.post("/courses", response_model=CourseResponse)
-async def create_course(course: CourseCreate, db: Session = Depends(get_db)):
-    """Create a new course."""
+async def create_course(course: CourseCreate, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Create a new course for the authenticated user."""
     try:
         # Create new course
         db_course = CourseDB(
             name=course.name,
-            description=course.description
+            description=course.description,
+            user_id=current_user.id
         )
         
         db.add(db_course)
@@ -855,10 +1004,10 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to delete course: {str(e)}")
 
 @app.get("/courses", response_model=List[CourseResponse])
-async def get_courses(db: Session = Depends(get_db)):
-    """Get all courses with lecture counts."""
+async def get_courses(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all courses for the authenticated user with lecture counts."""
     try:
-        courses = db.query(CourseDB).all()
+        courses = db.query(CourseDB).filter(CourseDB.user_id == current_user.id).all()
         
         course_responses = []
         for course in courses:
@@ -884,10 +1033,13 @@ async def get_courses(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/courses/{course_id}", response_model=CourseResponse)
-async def get_course(course_id: int, db: Session = Depends(get_db)):
-    """Get a specific course by ID."""
+async def get_course(course_id: int, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get a specific course by ID for the authenticated user."""
     try:
-        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        course = db.query(CourseDB).filter(
+            CourseDB.id == course_id,
+            CourseDB.user_id == current_user.id
+        ).first()
         
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
@@ -914,11 +1066,14 @@ async def get_course(course_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/courses/{course_id}/lectures", response_model=List[LectureResponse])
-async def get_course_lectures(course_id: int, db: Session = Depends(get_db)):
-    """Get all lectures in a specific course."""
+async def get_course_lectures(course_id: int, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all lectures in a specific course for the authenticated user."""
     try:
-        # Verify course exists
-        course = db.query(CourseDB).filter(CourseDB.id == course_id).first()
+        # Verify course exists and belongs to user
+        course = db.query(CourseDB).filter(
+            CourseDB.id == course_id,
+            CourseDB.user_id == current_user.id
+        ).first()
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
         
