@@ -557,6 +557,7 @@ async def get_course_documents(course_id: int, current_user: UserDB = Depends(ge
 async def upload_document_to_course(
     course_id: int,
     file: UploadFile = File(...),
+    custom_name: str = Form(None),
     db: Session = Depends(get_db)
 ):
     """Upload a document to a specific course for processing."""
@@ -583,7 +584,17 @@ async def upload_document_to_course(
         
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{file.filename}"
+        
+        # Use custom name if provided, otherwise use original filename
+        if custom_name and custom_name.strip():
+            display_name = custom_name.strip()
+            # Ensure the display name has the correct extension
+            if not display_name.endswith(file_extension):
+                display_name += file_extension
+        else:
+            display_name = file.filename
+        
+        filename = f"{timestamp}_{display_name}"
         file_path = os.path.join(settings.UPLOAD_DIR, filename)
         
         # Save file

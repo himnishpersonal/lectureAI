@@ -95,7 +95,7 @@ export function UploadDocumentDialog({ children, lectureId, courseId, onDocument
           if (lectureId) {
             result = await api.uploadDocumentToLecture(lectureId, uploadFile.file, uploadFile.customName)
           } else if (courseId) {
-            result = await api.uploadDocument(Number.parseInt(courseId), uploadFile.file)
+            result = await api.uploadDocument(Number.parseInt(courseId), uploadFile.file, uploadFile.customName)
           } else {
             throw new Error("Either lectureId or courseId must be provided")
           }

@@ -161,16 +161,16 @@ export function DocumentViewerPage({ courseId, lectureId, documentId }: Document
           </Button>
         </div>
 
-        {/* Document Info */}
+        {/* Document Info with Enhanced Details */}
         <Card className="bg-gray-900 border-gray-700 mb-6">
           <CardHeader>
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-3">
                 {getFileIcon()}
-                <div>
+                <div className="flex-1">
                   <CardTitle className="text-white text-xl">{document.filename}</CardTitle>
                   <CardDescription className="text-gray-400 mt-1">
-                    <div className="flex items-center gap-4 text-sm">
+                    <div className="flex items-center gap-4 text-sm flex-wrap">
                       <div className="flex items-center gap-1">
                         {getStatusIcon()}
                         <span className="capitalize">{document.processed}</span>
@@ -179,144 +179,97 @@ export function DocumentViewerPage({ courseId, lectureId, documentId }: Document
                       <span>{apiUtils.formatFileSize(document.file_size)}</span>
                       <span>•</span>
                       <span>{new Date(document.upload_date).toLocaleDateString()}</span>
+                      <span>•</span>
+                      <span>{document.file_type}</span>
+                      {document.num_chunks && (
+                        <>
+                          <span>•</span>
+                          <span>{document.num_chunks} chunks</span>
+                        </>
+                      )}
+                      {document.is_audio === "true" && document.audio_duration && (
+                        <>
+                          <span>•</span>
+                          <span>{Math.round(document.audio_duration)}s duration</span>
+                        </>
+                      )}
+                      {document.is_audio === "true" && (
+                        <>
+                          <span>•</span>
+                          <span className="capitalize">{document.transcription_status || "pending"} transcription</span>
+                        </>
+                      )}
                     </div>
                   </CardDescription>
                 </div>
               </div>
-              <Badge variant="outline" className="text-gray-400 border-gray-600">
-                {document.is_audio === "true" ? "Audio File" : "Document"}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="text-gray-400 border-gray-600">
+                  {document.is_audio === "true" ? "Audio File" : "Document"}
+                </Badge>
+                {notesAvailable && (
+                  <Badge variant="outline" className="text-green-400 border-green-600">
+                    <Brain className="h-3 w-3 mr-1" />
+                    AI Notes Ready
+                  </Badge>
+                )}
+              </div>
             </div>
           </CardHeader>
         </Card>
 
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Content Tab Navigation */}
-          <Card className="bg-gray-900 border-gray-700">
-            <CardHeader>
-              <div className="flex gap-2 border-b border-gray-600 pb-4">
-                <Button
-                  variant={activeTab === "content" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setActiveTab("content")}
-                  className={activeTab === "content" ? "bg-blue-600 hover:bg-blue-700" : "text-gray-400 hover:text-white"}
-                >
-                  {document.is_audio === "true" ? "Transcript" : "Content"}
-                </Button>
-                <Button
-                  variant={activeTab === "notes" ? "default" : "ghost"}
-                  size="sm"
-                  onClick={() => setActiveTab("notes")}
-                  className={activeTab === "notes" ? "bg-blue-600 hover:bg-blue-700" : "text-gray-400 hover:text-white"}
-                >
-                  <Brain className="h-4 w-4 mr-1" />
-                  AI Notes
-                  {!notesAvailable && (
-                    <span className="ml-1 text-xs text-yellow-400">(Not Available)</span>
-                  )}
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[600px] w-full">
-                <div className="pr-4">
-                  {activeTab === "content" ? (
-                    <pre className="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed">
-                      {content || "No content available"}
-                    </pre>
-                  ) : (
-                    <div className="text-sm text-gray-300 leading-relaxed">
-                      {notesAvailable ? (
-                        <div dangerouslySetInnerHTML={{ __html: aiNotes.replace(/\n/g, '<br>') }} />
-                      ) : (
-                        <div className="text-center py-8">
-                          <Brain className="h-12 w-12 text-gray-500 mx-auto mb-4" />
-                          <p className="text-gray-400 mb-4">AI notes not available</p>
-                          <p className="text-gray-500 text-sm">
-                            AI notes may not have been generated for this document yet.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-
-          {/* Document Metadata */}
-          <Card className="bg-gray-900 border-gray-700">
-            <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
-                <FileText className="h-5 w-5" />
-                Document Details
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <span className="text-gray-400">File Type:</span>
-                  <p className="text-white">{document.file_type}</p>
-                </div>
-                <div>
-                  <span className="text-gray-400">File Size:</span>
-                  <p className="text-white">{apiUtils.formatFileSize(document.file_size)}</p>
-                </div>
-                <div>
-                  <span className="text-gray-400">Upload Date:</span>
-                  <p className="text-white">{new Date(document.upload_date).toLocaleDateString()}</p>
-                </div>
-                <div>
-                  <span className="text-gray-400">Status:</span>
-                  <p className="text-white capitalize">{document.processed}</p>
-                </div>
-                {document.num_chunks && (
-                  <div>
-                    <span className="text-gray-400">Chunks:</span>
-                    <p className="text-white">{document.num_chunks}</p>
-                  </div>
+        {/* Main Content - Full Width */}
+        <Card className="bg-gray-900 border-gray-700">
+          <CardHeader>
+            <div className="flex gap-2 border-b border-gray-600 pb-4">
+              <Button
+                variant={activeTab === "content" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => setActiveTab("content")}
+                className={activeTab === "content" ? "bg-blue-600 hover:bg-blue-700" : "text-gray-400 hover:text-white"}
+              >
+                {document.is_audio === "true" ? "Transcript" : "Content"}
+              </Button>
+              <Button
+                variant={activeTab === "notes" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => setActiveTab("notes")}
+                className={activeTab === "notes" ? "bg-blue-600 hover:bg-blue-700" : "text-gray-400 hover:text-white"}
+              >
+                <Brain className="h-4 w-4 mr-1" />
+                AI Notes
+                {!notesAvailable && (
+                  <span className="ml-1 text-xs text-yellow-400">(Not Available)</span>
                 )}
-                {document.is_audio === "true" && document.audio_duration && (
-                  <div>
-                    <span className="text-gray-400">Duration:</span>
-                    <p className="text-white">{Math.round(document.audio_duration)}s</p>
-                  </div>
-                )}
-              </div>
-
-              {document.is_audio === "true" && (
-                <div className="pt-4 border-t border-gray-600">
-                  <h4 className="text-white font-medium mb-2">Audio Information</h4>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-gray-400">Transcription:</span>
-                      <p className="text-white capitalize">{document.transcription_status || "pending"}</p>
-                    </div>
-                    {document.audio_duration && (
-                      <div>
-                        <span className="text-gray-400">Duration:</span>
-                        <p className="text-white">{Math.round(document.audio_duration)} seconds</p>
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="h-[700px] w-full">
+              <div className="pr-4">
+                {activeTab === "content" ? (
+                  <pre className="whitespace-pre-wrap text-sm text-gray-300 leading-relaxed">
+                    {content || "No content available"}
+                  </pre>
+                ) : (
+                  <div className="text-sm text-gray-300 leading-relaxed">
+                    {notesAvailable ? (
+                      <div dangerouslySetInnerHTML={{ __html: aiNotes.replace(/\n/g, '<br>') }} />
+                    ) : (
+                      <div className="text-center py-8">
+                        <Brain className="h-12 w-12 text-gray-500 mx-auto mb-4" />
+                        <p className="text-gray-400 mb-4">AI notes not available</p>
+                        <p className="text-gray-500 text-sm">
+                          AI notes may not have been generated for this document yet.
+                        </p>
                       </div>
                     )}
                   </div>
-                </div>
-              )}
-
-              {notesAvailable && (
-                <div className="pt-4 border-t border-gray-600">
-                  <h4 className="text-white font-medium mb-2 flex items-center gap-2">
-                    <Brain className="h-4 w-4" />
-                    AI Notes Available
-                  </h4>
-                  <p className="text-gray-400 text-sm">
-                    AI-generated study notes are ready for this document.
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+                )}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
       </div>
     </div>
   )
