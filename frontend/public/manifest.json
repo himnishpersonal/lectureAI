@@ -1,0 +1,21 @@
+{
+  "name": "LectureAI - Smart Study Companion",
+  "short_name": "LectureAI",
+  "description": "AI-powered educational platform for course management and intelligent study notes",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#3b82f6",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "16x16 32x32",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
