@@ -2,7 +2,7 @@ import { DocumentDetails } from "@/components/document-details"
 import { AudioPlayer } from "@/components/audio-player"
 import { config } from "@/lib/config"
 import { TranscriptViewer } from "@/components/transcript-viewer"
-import { AINotesViewer } from "@/components/ai-notes-viewer"
+import { RichAINotesViewer } from "@/components/rich-ai-notes-viewer"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft } from "lucide-react"
 import Link from "next/link"
@@ -36,7 +36,7 @@ export default async function DocumentPage({ params }: DocumentPageProps) {
           </div>
 
           <div>
-            <AINotesViewer documentId={Number.parseInt(documentId)} />
+            <RichAINotesViewer documentId={Number.parseInt(documentId)} />
           </div>
         </div>
       </div>

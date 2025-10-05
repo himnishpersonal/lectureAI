@@ -1,17 +1,56 @@
-# CrossCheck Technical Implementation Guide
+## AI Chat: End-to-End Flow (Frontend → Backend → LLM)
 
-## Overview
+This section explains how the AI chat works, from the user’s message in the UI to the generated answer with citations.
 
-CrossCheck is a Retrieval-Augmented Generation (RAG) system designed for journalists to analyze documents using AI. This comprehensive guide explains the complete technical pipeline from document upload to AI-generated responses, with detailed focus on vector operations and troubleshooting.
+1) Frontend chat input (Next.js)
+- The user types in the chat UI (e.g., pages under `frontend/app/chat` or chat components).
+- The frontend calls the backend API to query either a specific course or documents using `frontend/lib/api.ts`:
+  - `POST /courses/{courseId}/query` for course-aware chat
+  - `POST /query` for generic document queries
+- Each request includes the user’s message and optional scoping (course_id, document_ids, max_results).
 
-## Architecture Overview
+2) API entrypoints (FastAPI)
+- Endpoints are defined in `backend/api.py` and validate inputs, scope, and permissions.
+- For course chat, the backend calls `RAGService.query_course(user_input, course_id, k)`.
+- For single-document chat, it calls `RAGService.query_document(user_input, document_id, k)`.
 
-```
-User Upload → Document Processing → Embedding Generation → Vector Storage → Query Processing → AI Response
-     ↓              ↓                      ↓                   ↓               ↓              ↓
-  Streamlit     Text Extraction        SentenceTransformers    FAISS        Similarity      DeepSeek V3
-    UI         + Chunking              (all-MiniLM-L6-v2)     Index         Search         via OpenRouter
-```
+3) Embedding the user query
+- `RAGService` uses `EmbeddingService` to convert the user input into a 384‑dimensional vector (all‑MiniLM‑L6‑v2).
+- This vector is L2‑normalized when searching cosine similarity indices.
+
+4) Retrieval from FAISS (vector search)
+- Course queries use the course‑scoped FAISS index: one index per course in `VectorStore.course_indices`.
+- Document queries use document‑scoped indices in `VectorStore.document_indices` (legacy/isolation mode).
+- The store returns Top‑K chunks with similarity scores and rich metadata (filename, chunk_index, text, course_id/document_id).
+- Indices and metadata are persisted to disk under `data/embeddings/` as `faiss_index_course_{id}.*` (or `_doc_{id}.*`).
+
+5) Context construction
+- Retrieved chunks are transformed into a compact, ordered context (e.g., "[Chunk 3]: text…").
+- The system caps to K chunks and preserves source metadata for later citations.
+
+6) Prompt building and LLM call
+- `RAGService` builds a system prompt that instructs the model to answer strictly from the provided excerpts, and adapts tone if the input is a question vs topic.
+- The service calls the selected LLM via OpenRouter (`deepseek/deepseek-chat` by default), passing system + user messages and temperature.
+
+7) Response shaping and citations
+- The raw LLM output is wrapped with a response payload including:
+  - `answer`: the generated response
+  - `citations`: list of referenced chunks with filename, similarity score, and previews
+  - `success` and optional `model_info`/`course_info`
+- The frontend renders the answer and shows sources (expanders/cards) so users can trace statements to original chunks.
+
+8) Scoping and safety
+- Course scoping keeps retrieval tightly focused on the user’s selected course.
+- Document isolation (legacy path) prevents cross‑document contamination when needed.
+- If no chunks are found or the embedding service is unavailable, the API returns a graceful error with diagnostics.
+
+9) Persistence and cold starts
+- On startup, `VectorStore` auto‑loads existing indices from disk so reboots don’t require re‑embedding.
+- New uploads trigger processing → chunking → embedding → index update → metadata persistence.
+
+10) Performance notes
+- Exact search uses `IndexFlatIP` (cosine via L2 normalization) per course; for very large corpora, IVF/HNSW can be introduced.
+- Retrieval K and chunk sizes are configurable (see `utils/config.py`).
 
 ## Complete Data Flow Pipeline
 

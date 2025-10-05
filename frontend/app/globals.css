@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Import Quill dark theme styles */
+@import '../styles/quill-dark.css';
+
 :root {
   /* Light mode with blue accent scheme */
   --background: #ffffff;

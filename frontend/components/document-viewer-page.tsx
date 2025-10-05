@@ -19,6 +19,7 @@ import {
 } from "lucide-react"
 import { api, type Document, type DocumentChunksResponse, type AINote, APIError, apiUtils } from "@/lib/api"
 import { useAuth } from "@/components/auth/auth-provider"
+import { RichAINotesViewer } from "@/components/rich-ai-notes-viewer"
 
 interface DocumentViewerPageProps {
   courseId: number
@@ -30,7 +31,6 @@ export function DocumentViewerPage({ courseId, lectureId, documentId }: Document
   const router = useRouter()
   const [document, setDocument] = useState<Document | null>(null)
   const [content, setContent] = useState<string>("")
-  const [aiNotes, setAiNotes] = useState<string>("")
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<"content" | "notes">("content")
   const [notesAvailable, setNotesAvailable] = useState(false)
@@ -58,9 +58,8 @@ export function DocumentViewerPage({ courseId, lectureId, documentId }: Document
       const fullContent = chunksResponse.chunks.map(chunk => chunk.content).join('\n\n')
       setContent(fullContent)
 
-      // Set AI notes
+      // Check if AI notes are available
       if (notesResponse && notesResponse.notes) {
-        setAiNotes(notesResponse.notes)
         setNotesAvailable(true)
       }
     } catch (error) {
@@ -252,18 +251,8 @@ export function DocumentViewerPage({ courseId, lectureId, documentId }: Document
                     {content || "No content available"}
                   </pre>
                 ) : (
-                  <div className="text-sm text-gray-300 leading-relaxed">
-                    {notesAvailable ? (
-                      <div dangerouslySetInnerHTML={{ __html: aiNotes.replace(/\n/g, '<br>') }} />
-                    ) : (
-                      <div className="text-center py-8">
-                        <Brain className="h-12 w-12 text-gray-500 mx-auto mb-4" />
-                        <p className="text-gray-400 mb-4">AI notes not available</p>
-                        <p className="text-gray-500 text-sm">
-                          AI notes may not have been generated for this document yet.
-                        </p>
-                      </div>
-                    )}
+                  <div className="h-full">
+                    <RichAINotesViewer documentId={documentId} />
                   </div>
                 )}
               </div>

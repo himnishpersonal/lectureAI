@@ -30,6 +30,20 @@ interface ChatMessage {
 
 export function ChatInterface() {
   const [courses, setCourses] = useState<Course[]>([])
+  
+  // Convert markdown formatting to HTML
+  const formatMessageContent = (content: string): string => {
+    return content
+      // Convert **bold** to <strong>
+      .replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold">$1</strong>')
+      // Convert bullet points • to proper list items
+      .replace(/^•\s+(.+)$/gm, '<li class="ml-4">$1</li>')
+      // Convert numbered lists
+      .replace(/^(\d+)\.\s+(.+)$/gm, '<div class="ml-4"><strong>$1.</strong> $2</div>')
+      // Preserve line breaks
+      .replace(/\n\n/g, '<br/><br/>')
+      .replace(/\n/g, '<br/>')
+  }
   const [selectedCourse, setSelectedCourse] = useState<string>("")
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [inputValue, setInputValue] = useState("")
@@ -205,34 +219,26 @@ export function ChatInterface() {
                             : "bg-muted text-muted-foreground"
                         }`}
                       >
-                        <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                        <div 
+                          className="text-sm leading-relaxed"
+                          dangerouslySetInnerHTML={{ __html: formatMessageContent(message.content) }}
+                        />
                       </div>
                       <div className="flex items-center gap-2 mt-1">
                         <span className="text-xs text-muted-foreground">{formatTimestamp(message.timestamp)}</span>
                       </div>
                       {/* Citations */}
                       {message.citations && message.citations.length > 0 && (
-                        <div className="mt-3 space-y-2">
-                          <p className="text-xs font-medium text-muted-foreground">Sources:</p>
-                          {message.citations.map((citation, index) => (
-                            <Card key={index} className="p-3 bg-background/50">
-                              <div className="flex items-start gap-2">
-                                {getFileIcon(citation.filename)}
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    <p className="text-xs font-medium truncate">{citation.filename}</p>
-                                    <Badge variant="outline" className="text-xs">
-                                      {Math.round(citation.similarity_score * 100)}% match
-                                    </Badge>
-                                  </div>
-                                  <p className="text-xs text-muted-foreground line-clamp-2">{citation.text}</p>
-                                </div>
-                                <Button variant="ghost" size="sm">
-                                  <ExternalLink className="h-3 w-3" />
-                                </Button>
-                              </div>
-                            </Card>
-                          ))}
+                        <div className="mt-3">
+                          <p className="text-xs font-medium text-muted-foreground mb-2">Sources:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {Array.from(new Set(message.citations.map(c => c.filename))).map((filename, index) => (
+                              <Badge key={index} variant="outline" className="text-xs flex items-center gap-1">
+                                {getFileIcon(filename)}
+                                <span>{filename}</span>
+                              </Badge>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>

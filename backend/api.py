@@ -1533,6 +1533,41 @@ async def get_ai_notes(
         logger.error(f"Error retrieving AI notes: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.put("/documents/{document_id}/notes")
+async def update_ai_notes(
+    document_id: int,
+    request: dict,
+    db: Session = Depends(get_db)
+):
+    """Update AI-generated notes for a document."""
+    try:
+        # Check if document exists
+        document = db.query(DocumentDB).filter(DocumentDB.id == document_id).first()
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get AI notes
+        notes = db.query(AINotesDB).filter(AINotesDB.document_id == document_id).first()
+        if not notes:
+            raise HTTPException(status_code=404, detail="No AI notes found for this document")
+        
+        # Update notes content
+        notes.notes = request.get("content", "")
+        notes.generated_at = datetime.utcnow()  # Update timestamp to reflect edit
+        db.commit()
+        
+        return {
+            "message": "AI notes updated successfully",
+            "notes_id": notes.id,
+            "updated_at": notes.generated_at
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating AI notes: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/documents/{document_id}/chunks")
 async def get_document_chunks(
     document_id: int,
